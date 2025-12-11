@@ -19,9 +19,7 @@ import time
 from functools import wraps
 from typing import Dict, Any
 from pathlib import Path
-
 from telegram.error import BadRequest
-
 
 from telegram import (
     Update,
@@ -115,6 +113,44 @@ async def ensure_state(context: ContextTypes.DEFAULT_TYPE):
         context.application.help_state = load_state()
     if not hasattr(context.application, "admin_sessions"):
         context.application.admin_sessions = {}
+
+
+# --- Helper: safe edit for admin messages --------------------------------------
+
+async def safe_edit_admin_message(query, text, reply_markup=None):
+    """
+    Try to update the admin message in a safe order:
+      1) edit_message_text (if message had text)
+      2) edit_message_caption (if message was media with caption)
+      3) edit_message_reply_markup (remove buttons)
+      4) fallback to answering the callback
+    """
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+        return
+    except BadRequest as e:
+        # try edit caption if it's a media message
+        try:
+            await query.edit_message_caption(caption=text, reply_markup=reply_markup)
+            return
+        except BadRequest:
+            # maybe there is no caption or caption can't be edited; try removing markup
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                return
+            except Exception:
+                # last fallback: answer callback so admin sees confirmation
+                try:
+                    await query.answer(text)
+                except Exception:
+                    pass
+                return
+    except Exception:
+        # last fallback: answer callback
+        try:
+            await query.answer(text)
+        except Exception:
+            pass
 
 
 # --- Admin helper functions ----------------------------------------------------
@@ -281,7 +317,7 @@ async def handle_admin_payment_action(update: Update, context: ContextTypes.DEFA
                                        text="Your payment submission was reviewed by admin and declined. If you believe this is a mistake, reply here or contact support.")
         s["pending"].pop(pending_id, None)
         save_state(s)
-        await query.edit_message_text("Declined and user notified.")
+        await safe_edit_admin_message(query, "Declined and user notified.")
         return
 
     vip_link = s.get("vip_link", "")
@@ -307,7 +343,7 @@ async def handle_admin_payment_action(update: Update, context: ContextTypes.DEFA
 
     s["pending"].pop(pending_id, None)
     save_state(s)
-    await query.edit_message_text("Approved and links sent to user.")
+    await safe_edit_admin_message(query, "Approved and links sent to user.")
 
 
 async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT_TYPE, pending_id: str, action: str):
@@ -345,7 +381,7 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
             pass
         # also try to edit the admin message so it's not left with stale buttons
         try:
-            await query.edit_message_text("This pending item was already handled or expired.")
+            await safe_edit_admin_message(query, "This pending item was already handled or expired.")
         except Exception:
             pass
         return
@@ -364,7 +400,7 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
         except Exception as e:
             # tell admin about failure to notify the user
             try:
-                await query.edit_message_text(f"Ignored, but failed to notify user: {e}")
+                await safe_edit_admin_message(query, f"Ignored, but failed to notify user: {e}")
             except Exception:
                 pass
             # still remove pending if present
@@ -377,14 +413,7 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
         save_state(s)
 
         # update admin message
-        try:
-            await query.edit_message_text("Ignored and user notified.")
-        except Exception:
-            # if editing fails, at least send a short callback answer
-            try:
-                await query.answer("Ignored and user notified.", show_alert=False)
-            except Exception:
-                pass
+        await safe_edit_admin_message(query, "Ignored and user notified.")
         return
 
     if action == "reply":
@@ -398,17 +427,10 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
 
         # show admin that quick-reply is active and provide a Cancel button
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel quick-reply", callback_data=f"admin_quick_cancel_{admin_id}")]])
-        try:
-            await query.edit_message_text(
-                "Quick-reply mode: send the reply message here and it will be forwarded to the user.\nTo cancel, press the button below or send /cancel.",
-                reply_markup=cancel_kb
-            )
-        except Exception:
-            # fallback: at least answer the callback
-            try:
-                await query.answer("Quick-reply mode enabled. Send your reply or /cancel.")
-            except Exception:
-                pass
+        await safe_edit_admin_message(query,
+            "Quick-reply mode: send the reply message here and it will be forwarded to the user.\nTo cancel, press the button below or send /cancel.",
+            reply_markup=cancel_kb
+        )
         return
 
     # unknown action fallback
@@ -417,41 +439,6 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
     except Exception:
         pass
 
-async def safe_edit_admin_message(query, text, reply_markup=None):
-    """
-    Try to update the admin message in a safe order:
-      1) edit_message_text (if message had text)
-      2) edit_message_caption (if message was media with caption)
-      3) edit_message_reply_markup (remove buttons)
-      4) fallback to answering the callback
-    """
-    try:
-        await query.edit_message_text(text, reply_markup=reply_markup)
-        return
-    except BadRequest as e:
-        # common case: "There is no text in the message to edit"
-        msg = str(e)
-        # try edit caption if it's a media message
-        try:
-            await query.edit_message_caption(caption=text, reply_markup=reply_markup)
-            return
-        except BadRequest:
-            # maybe there is no caption or caption can't be edited; try removing markup
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                # last fallback: answer callback so admin sees confirmation
-                try:
-                    await query.answer(text)
-                except Exception:
-                    pass
-            return
-    except Exception:
-        # last fallback: answer callback
-        try:
-            await query.answer(text)
-        except Exception:
-            pass
 
 # --- New: quick-cancel callback handler ----------------------------------------
 
@@ -477,7 +464,7 @@ async def handle_quick_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if admin_id is None or admin_id not in ADMIN_IDS:
         try:
-            await query.edit_message_text("Unauthorized to cancel.")
+            await safe_edit_admin_message(query, "Unauthorized to cancel.")
         except Exception:
             try:
                 await query.answer("Unauthorized", show_alert=True)
@@ -488,13 +475,7 @@ async def handle_quick_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
     # remove session if present
     session = context.application.admin_sessions.pop(admin_id, None)
 
-    try:
-        await query.edit_message_text("Quick-reply cancelled.")
-    except Exception:
-        try:
-            await query.answer("Quick-reply cancelled.")
-        except Exception:
-            pass
+    await safe_edit_admin_message(query, "Quick-reply cancelled.")
 
 
 # --- Message / media handlers ---------------------------------------------------
