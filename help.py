@@ -4,18 +4,13 @@ Telegram Help Center Bot
 - Python 3.11.11
 - Requires: python-telegram-bot==20.7
 
-This is a cleaned, stable version of your help-center bot with extended admin link commands and an admin panel.
-Features added in this update:
-- /set_both_link <vip_url> <dark_url>
-- /get_links to view current VIP/DARK links
-- /admin command (admin panel) with buttons for: Set VIP, Set DARK, Set BOTH, Broadcast, Insights
-- Button-driven link setting: admin presses Set VIP/Set DARK/Set BOTH, bot asks for link(s), admin sends text to save
-
-State notes:
-- The bot keeps a small in-memory `admin_sessions` dictionary on the Application object to track when an admin is expected to send link text. This is transient (not persisted); if the bot restarts the admin will need to reissue the button.
-
-Run: python help.py
-Environment variables required: BOT_TOKEN, ADMIN_CHAT_ID (comma separated), DATA_DIR (optional)
+Features:
+- Payment and Technical issue flows (text + media)
+- Admin panel with Set VIP / Set DARK / Set BOTH / Broadcast / Insights / Get Links
+- Admin quick-reply flow for tech issues (Reply -> next admin message forwarded)
+- Admin commands: /set_vip_link, /set_dark_link, /set_both_link, /get_links, /admin, /broadcast, /insights, /reply
+- /cancel (admin) cancels quick-reply or any admin session
+- Persistence in DATA_DIR/helpcenter_state.json
 """
 
 import os
@@ -50,7 +45,7 @@ if not BOT_TOKEN:
 
 ADMIN_IDS = set()
 if ADMIN_CHAT_ID:
-    for part in ADMIN_CHAT_ID.split(','):
+    for part in ADMIN_CHAT_ID.split(","):
         part = part.strip()
         if part:
             try:
@@ -99,9 +94,9 @@ def admin_only(func):
             user_id = update.effective_user.id
         if user_id not in ADMIN_IDS:
             try:
-                if getattr(update, 'message', None):
+                if getattr(update, "message", None):
                     await update.message.reply_text("Unauthorized: admin only.")
-                elif getattr(update, 'callback_query', None):
+                elif getattr(update, "callback_query", None):
                     await update.callback_query.answer("Unauthorized", show_alert=True)
             except Exception:
                 pass
@@ -112,9 +107,9 @@ def admin_only(func):
 
 
 async def ensure_state(context: ContextTypes.DEFAULT_TYPE):
+    # populate application-level transient attributes
     if not hasattr(context.application, "help_state"):
         context.application.help_state = load_state()
-    # ensure admin_sessions exists (transient, not persisted)
     if not hasattr(context.application, "admin_sessions"):
         context.application.admin_sessions = {}
 
@@ -122,12 +117,16 @@ async def ensure_state(context: ContextTypes.DEFAULT_TYPE):
 # --- Admin helper functions ----------------------------------------------------
 
 async def send_admin_panel(admin_id: int, context: ContextTypes.DEFAULT_TYPE):
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Set VIP link", callback_data="adminpanel_set_vip") , InlineKeyboardButton("Set DARK link", callback_data="adminpanel_set_dark")],
-        [InlineKeyboardButton("Set BOTH links", callback_data="adminpanel_set_both")],
-        [InlineKeyboardButton("Broadcast", callback_data="adminpanel_broadcast") , InlineKeyboardButton("Insights", callback_data="adminpanel_insights")],
-        [InlineKeyboardButton("Get Links", callback_data="adminpanel_get_links")]
-    ])
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Set VIP link", callback_data="adminpanel_set_vip"),
+             InlineKeyboardButton("Set DARK link", callback_data="adminpanel_set_dark")],
+            [InlineKeyboardButton("Set BOTH links", callback_data="adminpanel_set_both")],
+            [InlineKeyboardButton("Broadcast", callback_data="adminpanel_broadcast"),
+             InlineKeyboardButton("Insights", callback_data="adminpanel_insights")],
+            [InlineKeyboardButton("Get Links", callback_data="adminpanel_get_links")],
+        ]
+    )
     try:
         await context.bot.send_message(chat_id=admin_id, text="Admin panel — choose an action:", reply_markup=kb)
     except Exception as e:
@@ -164,13 +163,15 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app = context.application
     s = app.help_state
 
-    # user issue flows
+    # user flows
     if data == "issue_payment":
         kb = [
-            [InlineKeyboardButton("VIP", callback_data="payment_vip"), InlineKeyboardButton("DARK", callback_data="payment_dark")],
+            [InlineKeyboardButton("VIP", callback_data="payment_vip"),
+             InlineKeyboardButton("DARK", callback_data="payment_dark")],
             [InlineKeyboardButton("BOTH", callback_data="payment_both")],
         ]
-        await query.edit_message_text("You chose *Payment issue*. Select the service:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("You chose *Payment issue*. Select the service:", parse_mode="Markdown",
+                                      reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if data.startswith("payment_"):
@@ -194,12 +195,10 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # admin panel callbacks
     if data.startswith("adminpanel_"):
-        # Only admins should reach these; validate
         if uid not in ADMIN_IDS:
             await query.answer("Unauthorized", show_alert=True)
             return
         action = data.split("adminpanel_", 1)[1]
-        # open session or prompt depending on action
         if action == "set_vip":
             context.application.admin_sessions[uid] = {"action": "set_vip"}
             await query.edit_message_text("Send the VIP link now (just paste the URL as a message).")
@@ -218,21 +217,25 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if action == "insights":
             counters = s.get("counters", {})
-            await query.edit_message_text(
-                f"Insights:
-Payments submitted: {counters.get('payment_submitted',0)}
-Tech submitted: {counters.get('tech_submitted',0)}
-Links sent: {counters.get('links_sent',0)}
-VIP link: {s.get('vip_link','(not set)')}
-DARK link: {s.get('dark_link','(not set)')}"
+            insights_msg = (
+                "Insights:\n"
+                f"Payments submitted: {counters.get('payment_submitted', 0)}\n"
+                f"Tech submitted: {counters.get('tech_submitted', 0)}\n"
+                f"Links sent: {counters.get('links_sent', 0)}\n"
+                f"VIP link: {s.get('vip_link', '(not set)')}\n"
+                f"DARK link: {s.get('dark_link', '(not set)')}"
             )
+            await query.edit_message_text(insights_msg)
             return
         if action == "get_links":
-            await query.edit_message_text(f"VIP link: {s.get('vip_link','(not set)')}
-DARK link: {s.get('dark_link','(not set)')}")
+            links_msg = (
+                f"VIP link: {s.get('vip_link', '(not set)')}\n"
+                f"DARK link: {s.get('dark_link', '(not set)')}"
+            )
+            await query.edit_message_text(links_msg)
             return
 
-    # admin approve/decline payment callbacks (from forwarded payments)
+    # admin approve/decline payment
     if data.startswith("admin_pay_"):
         _, _, payload = data.partition("admin_pay_")
         if "_" not in payload:
@@ -271,7 +274,8 @@ async def handle_admin_payment_action(update: Update, context: ContextTypes.DEFA
     user_id = int(pending["user_id"])
 
     if action == "decline":
-        await context.bot.send_message(chat_id=user_id, text="Your payment submission was reviewed by admin and declined. If you believe this is a mistake, reply here or contact support.")
+        await context.bot.send_message(chat_id=user_id,
+                                       text="Your payment submission was reviewed by admin and declined. If you believe this is a mistake, reply here or contact support.")
         s["pending"].pop(pending_id, None)
         save_state(s)
         await query.edit_message_text("Declined and user notified.")
@@ -329,14 +333,18 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
 
     if action == "reply":
         # switch to quick-reply mode: the next message the admin sends will be forwarded to the user
+        # store session keyed by admin_id
         context.application.admin_sessions[admin_id] = {"action": "quick_reply", "target_user": user_id, "pending_id": pending_id}
         await query.edit_message_text("Quick-reply mode: send the reply message here and it will be forwarded to the user. To cancel, send /cancel.")
         return
 
 
-# --- Message handlers -----------------------------------------------------------
+# --- Message / media handlers ---------------------------------------------------
 
 async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle incoming photos/documents for both payment and technical issue flows.
+    """
     await ensure_state(context)
     user = update.effective_user
     uid = user.id
@@ -344,38 +352,80 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     s = app.help_state
 
     user_rec = s["users"].get(str(uid), {})
-    if user_rec.get("last_action") != "awaiting_payment":
-        await update.message.reply_text("Please use the buttons and select your issue first. Tap /start to choose.")
+    last_action = user_rec.get("last_action")
+
+    if last_action not in ("awaiting_payment", "awaiting_tech"):
+        await update.message.reply_text("Please choose your issue from /start and tap the buttons before sending media.")
         return
 
     caption = update.message.caption or ""
-
     pending_id = str(int(time.time() * 1000))
-    pending_item = {
-        "type": "payment",
-        "user_id": str(uid),
-        "service": user_rec.get("last_service"),
-        "caption": caption,
-    }
 
+    if last_action == "awaiting_payment":
+        pending_item = {
+            "type": "payment",
+            "user_id": str(uid),
+            "service": user_rec.get("last_service"),
+            "caption": caption,
+        }
+        s["pending"][pending_id] = pending_item
+        s["counters"]["payment_submitted"] = s.get("counters", {}).get("payment_submitted", 0) + 1
+        save_state(s)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Approve VIP", callback_data=f"admin_pay_{pending_id}_vip"),
+             InlineKeyboardButton("Approve DARK", callback_data=f"admin_pay_{pending_id}_dark")],
+            [InlineKeyboardButton("Approve BOTH", callback_data=f"admin_pay_{pending_id}_both")],
+            [InlineKeyboardButton("Decline", callback_data=f"admin_pay_{pending_id}_decline")],
+        ])
+
+        if not ADMIN_IDS:
+            print("Warning: No ADMIN_IDS configured. Payment evidence will not be forwarded to any admin.")
+
+        for aid in ADMIN_IDS:
+            try:
+                caption_text = (
+                    f"Payment from {user.full_name} (id: {uid})\n"
+                    f"Service: {pending_item['service']}\n"
+                    f"Caption: {caption}"
+                )
+                if update.message.photo:
+                    await context.bot.send_photo(chat_id=aid, photo=update.message.photo[-1].file_id, caption=caption_text, reply_markup=kb)
+                elif update.message.document:
+                    await context.bot.send_document(chat_id=aid, document=update.message.document.file_id, caption=caption_text, reply_markup=kb)
+                else:
+                    await context.bot.send_message(chat_id=aid, text=caption_text, reply_markup=kb)
+            except Exception as e:
+                print("Failed to forward to admin", aid, e)
+
+        user_rec["last_action"] = None
+        save_state(s)
+        await update.message.reply_text("Thanks — your payment evidence has been sent to admin for review. We'll notify you when it's processed.")
+        return
+
+    # awaiting_tech
+    pending_item = {
+        "type": "tech",
+        "user_id": str(uid),
+        "caption": caption,
+        "has_media": True,
+    }
     s["pending"][pending_id] = pending_item
-    s["counters"]["payment_submitted"] += 1
+    s["counters"]["tech_submitted"] = s.get("counters", {}).get("tech_submitted", 0) + 1
     save_state(s)
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Approve VIP", callback_data=f"admin_pay_{pending_id}_vip"), InlineKeyboardButton("Approve DARK", callback_data=f"admin_pay_{pending_id}_dark")],
-        [InlineKeyboardButton("Approve BOTH", callback_data=f"admin_pay_{pending_id}_both")],
-        [InlineKeyboardButton("Decline", callback_data=f"admin_pay_{pending_id}_decline")],
+        [InlineKeyboardButton("Reply to user", callback_data=f"admin_tech_{pending_id}_reply"),
+         InlineKeyboardButton("Ignore", callback_data=f"admin_tech_{pending_id}_ignore")]
     ])
 
     if not ADMIN_IDS:
-        print("Warning: No ADMIN_IDS configured. Payment evidence will not be forwarded to any admin.")
+        print("Warning: No ADMIN_IDS configured. Tech media will not be forwarded to any admin.")
 
     for aid in ADMIN_IDS:
         try:
             caption_text = (
-                f"Payment from {user.full_name} (id: {uid})\n"
-                f"Service: {pending_item['service']}\n"
+                f"Tech issue (media) from {user.full_name} (id: {uid})\n"
                 f"Caption: {caption}"
             )
             if update.message.photo:
@@ -385,9 +435,12 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 await context.bot.send_message(chat_id=aid, text=caption_text, reply_markup=kb)
         except Exception as e:
-            print("Failed to forward to admin", aid, e)
+            print("Failed to forward tech media to admin", aid, e)
 
-    await update.message.reply_text("Thanks — your payment evidence has been sent to admin for review. We'll notify you when it's processed.")
+    user_rec["last_action"] = None
+    save_state(s)
+    await update.message.reply_text("Thanks — your technical issue (media) has been forwarded to admin. We'll notify you when it's resolved.")
+    return
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -398,15 +451,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = app.help_state
     text = update.message.text or ""
 
-    # check admin session first (for button-driven admin actions)
+    # allow admins to cancel any pending admin session (/cancel)
+    if text.strip().lower() == "/cancel" and uid in ADMIN_IDS:
+        session = context.application.admin_sessions.pop(uid, None)
+        if session:
+            await update.message.reply_text("Admin session cancelled.")
+        else:
+            await update.message.reply_text("No active admin session.")
+        return
+
+    # check admin session first (quick-reply, set_vip, etc.)
     admin_session = getattr(context.application, "admin_sessions", {}).get(uid)
     if admin_session and uid in ADMIN_IDS:
         action = admin_session.get("action")
-        # quick-reply: admin will write a message that should be forwarded to target user
+        # quick-reply: forward message to the target user
         if action == "quick_reply":
             target_user = admin_session.get("target_user")
             pending_id = admin_session.get("pending_id")
             try:
+                # forward the admin's text as reply
                 await context.bot.send_message(chat_id=target_user, text=f"Admin: {text}")
                 await update.message.reply_text("Reply sent to user.")
             except Exception as e:
@@ -420,7 +483,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             context.application.admin_sessions.pop(uid, None)
             return
-        # handle set_vip
+
+        # handle set_vip / set_dark / set_both / broadcast flows
         if action == "set_vip":
             s["vip_link"] = text.strip()
             save_state(s)
@@ -458,20 +522,28 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.application.admin_sessions.pop(uid, None)
             return
 
+    # now normal user flows and admin commands routed through same handler
     user_rec = s["users"].setdefault(str(uid), {})
     if user_rec.get("last_action") is None:
-        await update.message.reply_text("⚠️ Please choose your issue using /start and tap the buttons before messaging. This helps us fast-track your request.")
-        return
+        # allow admin commands even if user hasn't clicked buttons
+        if text.startswith("/"):
+            # continue to admin command handling below
+            pass
+        else:
+            await update.message.reply_text("⚠️ Please choose your issue using /start and tap the buttons before messaging. This helps us fast-track your request.")
+            return
 
+    # If user was awaiting tech (text) -> forward to admin
     if user_rec.get("last_action") == "awaiting_tech":
         pending_id = str(int(time.time() * 1000))
-        pending_item = {"type": "tech", "user_id": str(uid), "text": text}
+        pending_item = {"type": "tech", "user_id": str(uid), "text": text, "has_media": False}
         s["pending"][pending_id] = pending_item
-        s["counters"]["tech_submitted"] += 1
+        s["counters"]["tech_submitted"] = s.get("counters", {}).get("tech_submitted", 0) + 1
         save_state(s)
 
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Reply to user", callback_data=f"admin_tech_{pending_id}_reply"), InlineKeyboardButton("Ignore", callback_data=f"admin_tech_{pending_id}_ignore")]
+            [InlineKeyboardButton("Reply to user", callback_data=f"admin_tech_{pending_id}_reply"),
+             InlineKeyboardButton("Ignore", callback_data=f"admin_tech_{pending_id}_ignore")]
         ])
 
         if not ADMIN_IDS:
@@ -479,15 +551,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for aid in ADMIN_IDS:
             try:
-                text_to_admin = f"Tech issue from {user.full_name} (id: {uid})\n\n{text}"
+                text_to_admin = (
+                    f"Tech issue from {user.full_name} (id: {uid})\n\n"
+                    f"{text}"
+                )
                 await context.bot.send_message(chat_id=aid, text=text_to_admin, reply_markup=kb)
             except Exception as e:
                 print("Failed to forward tech issue", e)
 
         user_rec["last_action"] = None
+        save_state(s)
         await update.message.reply_text("Thanks — your technical issue has been forwarded to admin. We'll notify you when it's resolved.")
         return
 
+    # Admin typed a /reply (legacy direct command) OR other admin commands
+    # Process admin-only commands below
     if text.startswith("/reply") and uid in ADMIN_IDS:
         parts = text.split(maxsplit=2)
         if len(parts) < 3:
@@ -538,12 +616,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text.startswith("/get_links") and uid in ADMIN_IDS:
-        await update.message.reply_text(f"VIP link: {s.get('vip_link','(not set)')}
-DARK link: {s.get('dark_link','(not set)')}")
+        get_links_msg = (
+            f"VIP link: {s.get('vip_link','(not set)')}\n"
+            f"DARK link: {s.get('dark_link','(not set)')}"
+        )
+        await update.message.reply_text(get_links_msg)
         return
 
     if text.startswith("/admin") and uid in ADMIN_IDS:
-        # show admin panel
         await send_admin_panel(uid, context)
         return
 
@@ -567,23 +647,24 @@ DARK link: {s.get('dark_link','(not set)')}")
         counters = s.get("counters", {})
         vip = s.get("vip_link", "(not set)")
         dark = s.get("dark_link", "(not set)")
-        await update.message.reply_text(
-            f"Insights:
-Payments submitted: {counters.get('payment_submitted',0)}
-Tech submitted: {counters.get('tech_submitted',0)}
-Links sent: {counters.get('links_sent',0)}
-VIP link: {vip}
-DARK link: {dark}"
+        insights_msg = (
+            "Insights:\n"
+            f"Payments submitted: {counters.get('payment_submitted', 0)}\n"
+            f"Tech submitted: {counters.get('tech_submitted', 0)}\n"
+            f"Links sent: {counters.get('links_sent', 0)}\n"
+            f"VIP link: {vip}\n"
+            f"DARK link: {dark}"
         )
+        await update.message.reply_text(insights_msg)
         return
 
+    # fallback
     await update.message.reply_text("If you have an issue please use /start and choose the right button. For other help contact @Vip_Help_center1222_bot")
 
 
 # --- Main ----------------------------------------------------------------------
 
 def main():
-    # Build application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Load state synchronously at startup
@@ -593,13 +674,17 @@ def main():
         print("Failed to load initial state:", e)
         app.help_state = DEFAULT_STATE.copy()
 
+    # ensure admin_sessions exists
+    if not hasattr(app, "admin_sessions"):
+        app.admin_sessions = {}
+
     # Register handlers
     app.add_handler(CommandHandler("start", start))
-    # Capture command messages (like /set_vip_link, /set_dark_link, /admin, /get_links, /reply, etc.) and route them to the same text_handler
+    # route commands to the same text handler (your text_handler checks permissions)
     app.add_handler(MessageHandler(filters.COMMAND, text_handler))
     app.add_handler(CallbackQueryHandler(handle_buttons))
 
-    # media handlers (photo, document)
+    # media handlers (photo, document) - handles both payment & tech media
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, photo_or_doc_handler))
 
     # text handler (non-command texts)
