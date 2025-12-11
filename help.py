@@ -308,35 +308,155 @@ async def handle_admin_payment_action(update: Update, context: ContextTypes.DEFA
 
 
 async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT_TYPE, pending_id: str, action: str):
+    """
+    Handles admin actions on a tech pending item.
+    - 'ignore' -> notify user, remove pending
+    - 'reply'  -> switch admin into quick-reply mode; next admin message will be forwarded to target user
+    """
     await ensure_state(context)
     query = update.callback_query
+
+    # Always acknowledge the callback (important for client UX)
+    try:
+        await query.answer()
+    except Exception:
+        # ignore answer failure but continue
+        pass
+
     admin_id = query.from_user.id
     if admin_id not in ADMIN_IDS:
-        await query.answer("Unauthorized", show_alert=True)
+        try:
+            await query.answer("Unauthorized", show_alert=True)
+        except Exception:
+            pass
         return
 
     app = context.application
     s = app.help_state
-    pending = s["pending"].get(pending_id)
+
+    pending = s.get("pending", {}).get(pending_id)
     if not pending:
-        await query.answer("Pending item not found")
+        try:
+            await query.answer("Pending item not found", show_alert=True)
+        except Exception:
+            pass
+        # also try to edit the admin message so it's not left with stale buttons
+        try:
+            await query.edit_message_text("This pending item was already handled or expired.")
+        except Exception:
+            pass
         return
 
-    user_id = int(pending["user_id"])
+    # parse target user id
+    try:
+        user_id = int(pending["user_id"])
+    except Exception:
+        user_id = None
 
     if action == "ignore":
-        await context.bot.send_message(chat_id=user_id, text="Admin marked your issue as invalid/ignored. If you disagree, reply here.")
-        s["pending"].pop(pending_id, None)
+        # Notify user and cleanup
+        try:
+            if user_id:
+                await context.bot.send_message(chat_id=user_id, text="Admin marked your issue as invalid/ignored. If you disagree, reply here.")
+        except Exception as e:
+            # tell admin about failure to notify the user
+            try:
+                await query.edit_message_text(f"Ignored, but failed to notify user: {e}")
+            except Exception:
+                pass
+            # still remove pending if present
+            s.get("pending", {}).pop(pending_id, None)
+            save_state(s)
+            return
+
+        # remove pending and persist
+        s.get("pending", {}).pop(pending_id, None)
         save_state(s)
-        await query.edit_message_text("Ignored and user notified.")
+
+        # update admin message
+        try:
+            await query.edit_message_text("Ignored and user notified.")
+        except Exception:
+            # if editing fails, at least send a short callback answer
+            try:
+                await query.answer("Ignored and user notified.", show_alert=False)
+            except Exception:
+                pass
         return
 
     if action == "reply":
-        # switch to quick-reply mode: the next message the admin sends will be forwarded to the user
-        # store session keyed by admin_id
-        context.application.admin_sessions[admin_id] = {"action": "quick_reply", "target_user": user_id, "pending_id": pending_id}
-        await query.edit_message_text("Quick-reply mode: send the reply message here and it will be forwarded to the user. To cancel, send /cancel.")
+        # put admin into quick-reply mode (next message will be forwarded)
+        context.application.admin_sessions[admin_id] = {
+            "action": "quick_reply",
+            "target_user": user_id,
+            "pending_id": pending_id,
+            "started_at": int(time.time())
+        }
+
+        # show admin that quick-reply is active and provide a Cancel button
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel quick-reply", callback_data=f"admin_quick_cancel_{admin_id}")]])
+        try:
+            await query.edit_message_text(
+                "Quick-reply mode: send the reply message here and it will be forwarded to the user.\nTo cancel, press the button below or send /cancel.",
+                reply_markup=cancel_kb
+            )
+        except Exception:
+            # fallback: at least answer the callback
+            try:
+                await query.answer("Quick-reply mode enabled. Send your reply or /cancel.")
+            except Exception:
+                pass
         return
+
+    # unknown action fallback
+    try:
+        await query.answer("Unknown action", show_alert=True)
+    except Exception:
+        pass
+
+
+# --- New: quick-cancel callback handler ----------------------------------------
+
+async def handle_quick_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles the Cancel quick-reply inline button.
+    callback_data expected: admin_quick_cancel_<admin_id>
+    """
+    query = update.callback_query
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    data = query.data or ""
+    parts = data.split("_")
+    admin_id = None
+    if len(parts) >= 4:
+        try:
+            admin_id = int(parts[-1])
+        except Exception:
+            admin_id = None
+
+    if admin_id is None or admin_id not in ADMIN_IDS:
+        try:
+            await query.edit_message_text("Unauthorized to cancel.")
+        except Exception:
+            try:
+                await query.answer("Unauthorized", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    # remove session if present
+    session = context.application.admin_sessions.pop(admin_id, None)
+
+    try:
+        await query.edit_message_text("Quick-reply cancelled.")
+    except Exception:
+        try:
+            await query.answer("Quick-reply cancelled.")
+        except Exception:
+            pass
 
 
 # --- Message / media handlers ---------------------------------------------------
@@ -470,6 +590,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending_id = admin_session.get("pending_id")
             try:
                 # forward the admin's text as reply
+                if not target_user:
+                    await update.message.reply_text("No target user found; cancelling session.")
+                    context.application.admin_sessions.pop(uid, None)
+                    return
                 await context.bot.send_message(chat_id=target_user, text=f"Admin: {text}")
                 await update.message.reply_text("Reply sent to user.")
             except Exception as e:
@@ -682,6 +806,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     # route commands to the same text handler (your text_handler checks permissions)
     app.add_handler(MessageHandler(filters.COMMAND, text_handler))
+
+    # Register quick-cancel callback BEFORE generic button handler so pattern matches first
+    app.add_handler(CallbackQueryHandler(handle_quick_cancel, pattern=r"^admin_quick_cancel_"))
+
     app.add_handler(CallbackQueryHandler(handle_buttons))
 
     # media handlers (photo, document) - handles both payment & tech media
