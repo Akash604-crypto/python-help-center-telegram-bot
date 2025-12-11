@@ -4,9 +4,18 @@ Telegram Help Center Bot
 - Python 3.11.11
 - Requires: python-telegram-bot==20.7
 
-Extended admin link commands and an admin panel.
+This is a cleaned, stable version of your help-center bot with extended admin link commands and an admin panel.
+Features added in this update:
+- /set_both_link <vip_url> <dark_url>
+- /get_links to view current VIP/DARK links
+- /admin command (admin panel) with buttons for: Set VIP, Set DARK, Set BOTH, Broadcast, Insights
+- Button-driven link setting: admin presses Set VIP/Set DARK/Set BOTH, bot asks for link(s), admin sends text to save
+
+State notes:
+- The bot keeps a small in-memory `admin_sessions` dictionary on the Application object to track when an admin is expected to send link text. This is transient (not persisted); if the bot restarts the admin will need to reissue the button.
+
 Run: python help.py
-Env vars required: BOT_TOKEN, ADMIN_CHAT_ID (comma separated), DATA_DIR (optional)
+Environment variables required: BOT_TOKEN, ADMIN_CHAT_ID (comma separated), DATA_DIR (optional)
 """
 
 import os
@@ -114,9 +123,9 @@ async def ensure_state(context: ContextTypes.DEFAULT_TYPE):
 
 async def send_admin_panel(admin_id: int, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Set VIP link", callback_data="adminpanel_set_vip"), InlineKeyboardButton("Set DARK link", callback_data="adminpanel_set_dark")],
+        [InlineKeyboardButton("Set VIP link", callback_data="adminpanel_set_vip") , InlineKeyboardButton("Set DARK link", callback_data="adminpanel_set_dark")],
         [InlineKeyboardButton("Set BOTH links", callback_data="adminpanel_set_both")],
-        [InlineKeyboardButton("Broadcast", callback_data="adminpanel_broadcast"), InlineKeyboardButton("Insights", callback_data="adminpanel_insights")],
+        [InlineKeyboardButton("Broadcast", callback_data="adminpanel_broadcast") , InlineKeyboardButton("Insights", callback_data="adminpanel_insights")],
         [InlineKeyboardButton("Get Links", callback_data="adminpanel_get_links")]
     ])
     try:
@@ -209,23 +218,18 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if action == "insights":
             counters = s.get("counters", {})
-            # build message with explicit \n escapes
-            insights_msg = (
-                "Insights:\n"
-                f"Payments submitted: {counters.get('payment_submitted',0)}\n"
-                f"Tech submitted: {counters.get('tech_submitted',0)}\n"
-                f"Links sent: {counters.get('links_sent',0)}\n"
-                f"VIP link: {s.get('vip_link','(not set)')}\n"
-                f"DARK link: {s.get('dark_link','(not set)')}"
+            await query.edit_message_text(
+                f"Insights:
+Payments submitted: {counters.get('payment_submitted',0)}
+Tech submitted: {counters.get('tech_submitted',0)}
+Links sent: {counters.get('links_sent',0)}
+VIP link: {s.get('vip_link','(not set)')}
+DARK link: {s.get('dark_link','(not set)')}"
             )
-            await query.edit_message_text(insights_msg)
             return
         if action == "get_links":
-            links_msg = (
-                f"VIP link: {s.get('vip_link','(not set)')}\n"
-                f"DARK link: {s.get('dark_link','(not set)')}"
-            )
-            await query.edit_message_text(links_msg)
+            await query.edit_message_text(f"VIP link: {s.get('vip_link','(not set)')}
+DARK link: {s.get('dark_link','(not set)')}")
             return
 
     # admin approve/decline payment callbacks (from forwarded payments)
@@ -324,12 +328,9 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
         return
 
     if action == "reply":
-        # instruct admin to use /reply <user_id> <text>
-        instr = (
-            f"To reply, use the command: /reply {user_id} <your message>\n\n"
-            f"Example: /reply {user_id} Hi, we've fixed your issue. Please check now."
-        )
-        await query.edit_message_text(instr)
+        # switch to quick-reply mode: the next message the admin sends will be forwarded to the user
+        context.application.admin_sessions[admin_id] = {"action": "quick_reply", "target_user": user_id, "pending_id": pending_id}
+        await query.edit_message_text("Quick-reply mode: send the reply message here and it will be forwarded to the user. To cancel, send /cancel.")
         return
 
 
@@ -401,6 +402,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_session = getattr(context.application, "admin_sessions", {}).get(uid)
     if admin_session and uid in ADMIN_IDS:
         action = admin_session.get("action")
+        # quick-reply: admin will write a message that should be forwarded to target user
+        if action == "quick_reply":
+            target_user = admin_session.get("target_user")
+            pending_id = admin_session.get("pending_id")
+            try:
+                await context.bot.send_message(chat_id=target_user, text=f"Admin: {text}")
+                await update.message.reply_text("Reply sent to user.")
+            except Exception as e:
+                await update.message.reply_text(f"Failed to send reply: {e}")
+            # remove pending item if exists
+            try:
+                if pending_id and pending_id in s.get("pending", {}):
+                    s["pending"].pop(pending_id, None)
+                    save_state(s)
+            except Exception:
+                pass
+            context.application.admin_sessions.pop(uid, None)
+            return
         # handle set_vip
         if action == "set_vip":
             s["vip_link"] = text.strip()
@@ -519,11 +538,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text.startswith("/get_links") and uid in ADMIN_IDS:
-        get_links_msg = (
-            f"VIP link: {s.get('vip_link','(not set)')}\n"
-            f"DARK link: {s.get('dark_link','(not set)')}"
-        )
-        await update.message.reply_text(get_links_msg)
+        await update.message.reply_text(f"VIP link: {s.get('vip_link','(not set)')}
+DARK link: {s.get('dark_link','(not set)')}")
         return
 
     if text.startswith("/admin") and uid in ADMIN_IDS:
@@ -551,15 +567,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         counters = s.get("counters", {})
         vip = s.get("vip_link", "(not set)")
         dark = s.get("dark_link", "(not set)")
-        insights_msg = (
-            "Insights:\n"
-            f"Payments submitted: {counters.get('payment_submitted',0)}\n"
-            f"Tech submitted: {counters.get('tech_submitted',0)}\n"
-            f"Links sent: {counters.get('links_sent',0)}\n"
-            f"VIP link: {vip}\n"
-            f"DARK link: {dark}"
+        await update.message.reply_text(
+            f"Insights:
+Payments submitted: {counters.get('payment_submitted',0)}
+Tech submitted: {counters.get('tech_submitted',0)}
+Links sent: {counters.get('links_sent',0)}
+VIP link: {vip}
+DARK link: {dark}"
         )
-        await update.message.reply_text(insights_msg)
         return
 
     await update.message.reply_text("If you have an issue please use /start and choose the right button. For other help contact @Vip_Help_center1222_bot")
