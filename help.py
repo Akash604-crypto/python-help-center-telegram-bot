@@ -19,7 +19,7 @@ import time
 from functools import wraps
 from typing import Dict, Any
 from pathlib import Path
-from telegram import Error as TGError
+
 from telegram.error import BadRequest
 
 
