@@ -4,12 +4,15 @@ Telegram Help Center Bot
 - Python 3.11.11
 - Requires: python-telegram-bot==20.7
 
-This is a cleaned, stable version of your help-center bot.
-Key safety changes made:
-- Converted state load/save to synchronous functions to avoid asyncio event-loop binding issues.
-- Removed creation of asyncio.Lock at import time (no loop dependency).
-- Kept handlers async (for telegram) but state IO is synchronous (fast file write/read).
-- Normalized indentation and fixed all f-string/newline issues.
+This is a cleaned, stable version of your help-center bot with extended admin link commands and an admin panel.
+Features added in this update:
+- /set_both_link <vip_url> <dark_url>
+- /get_links to view current VIP/DARK links
+- /admin command (admin panel) with buttons for: Set VIP, Set DARK, Set BOTH, Broadcast, Insights
+- Button-driven link setting: admin presses Set VIP/Set DARK/Set BOTH, bot asks for link(s), admin sends text to save
+
+State notes:
+- The bot keeps a small in-memory `admin_sessions` dictionary on the Application object to track when an admin is expected to send link text. This is transient (not persisted); if the bot restarts the admin will need to reissue the button.
 
 Run: python help.py
 Environment variables required: BOT_TOKEN, ADMIN_CHAT_ID (comma separated), DATA_DIR (optional)
@@ -68,7 +71,6 @@ DEFAULT_STATE = {
 
 
 def load_state() -> Dict[str, Any]:
-    """Synchronous load of JSON state (safe, avoids asyncio loop entanglement)."""
     if STATE_FILE.exists():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -80,7 +82,6 @@ def load_state() -> Dict[str, Any]:
 
 
 def save_state(s: Dict[str, Any]):
-    """Synchronous save of JSON state."""
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(s, f, ensure_ascii=False, indent=2)
@@ -113,6 +114,24 @@ def admin_only(func):
 async def ensure_state(context: ContextTypes.DEFAULT_TYPE):
     if not hasattr(context.application, "help_state"):
         context.application.help_state = load_state()
+    # ensure admin_sessions exists (transient, not persisted)
+    if not hasattr(context.application, "admin_sessions"):
+        context.application.admin_sessions = {}
+
+
+# --- Admin helper functions ----------------------------------------------------
+
+async def send_admin_panel(admin_id: int, context: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Set VIP link", callback_data="adminpanel_set_vip") , InlineKeyboardButton("Set DARK link", callback_data="adminpanel_set_dark")],
+        [InlineKeyboardButton("Set BOTH links", callback_data="adminpanel_set_both")],
+        [InlineKeyboardButton("Broadcast", callback_data="adminpanel_broadcast") , InlineKeyboardButton("Insights", callback_data="adminpanel_insights")],
+        [InlineKeyboardButton("Get Links", callback_data="adminpanel_get_links")]
+    ])
+    try:
+        await context.bot.send_message(chat_id=admin_id, text="Admin panel — choose an action:", reply_markup=kb)
+    except Exception as e:
+        print("Failed to send admin panel to", admin_id, e)
 
 
 # --- Bot flows ------------------------------------------------------------------
@@ -145,6 +164,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app = context.application
     s = app.help_state
 
+    # user issue flows
     if data == "issue_payment":
         kb = [
             [InlineKeyboardButton("VIP", callback_data="payment_vip"), InlineKeyboardButton("DARK", callback_data="payment_dark")],
@@ -172,6 +192,47 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("For other issues please contact @Vip_Help_center1222_bot")
         return
 
+    # admin panel callbacks
+    if data.startswith("adminpanel_"):
+        # Only admins should reach these; validate
+        if uid not in ADMIN_IDS:
+            await query.answer("Unauthorized", show_alert=True)
+            return
+        action = data.split("adminpanel_", 1)[1]
+        # open session or prompt depending on action
+        if action == "set_vip":
+            context.application.admin_sessions[uid] = {"action": "set_vip"}
+            await query.edit_message_text("Send the VIP link now (just paste the URL as a message).")
+            return
+        if action == "set_dark":
+            context.application.admin_sessions[uid] = {"action": "set_dark"}
+            await query.edit_message_text("Send the DARK link now (just paste the URL as a message).")
+            return
+        if action == "set_both":
+            context.application.admin_sessions[uid] = {"action": "set_both"}
+            await query.edit_message_text("Send VIP and DARK links separated by a space (VIP_URL DARK_URL) or newline.")
+            return
+        if action == "broadcast":
+            context.application.admin_sessions[uid] = {"action": "broadcast"}
+            await query.edit_message_text("Send the broadcast message text now. It will be sent to all recorded users.")
+            return
+        if action == "insights":
+            counters = s.get("counters", {})
+            await query.edit_message_text(
+                f"Insights:
+Payments submitted: {counters.get('payment_submitted',0)}
+Tech submitted: {counters.get('tech_submitted',0)}
+Links sent: {counters.get('links_sent',0)}
+VIP link: {s.get('vip_link','(not set)')}
+DARK link: {s.get('dark_link','(not set)')}"
+            )
+            return
+        if action == "get_links":
+            await query.edit_message_text(f"VIP link: {s.get('vip_link','(not set)')}
+DARK link: {s.get('dark_link','(not set)')}")
+            return
+
+    # admin approve/decline payment callbacks (from forwarded payments)
     if data.startswith("admin_pay_"):
         _, _, payload = data.partition("admin_pay_")
         if "_" not in payload:
@@ -181,6 +242,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_admin_payment_action(update, context, pending_id, action)
         return
 
+    # admin tech callbacks (reply/ignore)
     if data.startswith("admin_tech_"):
         _, _, payload = data.partition("admin_tech_")
         if "_" not in payload:
@@ -266,19 +328,16 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
         return
 
     if action == "reply":
-        await query.edit_message_text(
-            (
-                f"To reply, use the command: /reply {user_id} <your message>\n\n"
-                f"Example: /reply {user_id} Hi, we've fixed your issue. Please check now."
-            )
-        )
+        # instruct admin to use /reply <user_id> <text>
+        await query.edit_message_text(f"To reply, use the command: /reply {user_id} <your message>
+
+Example: /reply {user_id} Hi, we've fixed your issue. Please check now.")
         return
 
 
 # --- Message handlers -----------------------------------------------------------
 
 async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catch payment screenshots and forward to admin if user was in awaiting_payment state."""
     await ensure_state(context)
     user = update.effective_user
     uid = user.id
@@ -333,7 +392,6 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle textual messages: warnings, tech submissions, and admin commands like /reply"""
     await ensure_state(context)
     user = update.effective_user
     uid = user.id
@@ -341,13 +399,54 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = app.help_state
     text = update.message.text or ""
 
+    # check admin session first (for button-driven admin actions)
+    admin_session = getattr(context.application, "admin_sessions", {}).get(uid)
+    if admin_session and uid in ADMIN_IDS:
+        action = admin_session.get("action")
+        # handle set_vip
+        if action == "set_vip":
+            s["vip_link"] = text.strip()
+            save_state(s)
+            await update.message.reply_text("VIP link saved.")
+            context.application.admin_sessions.pop(uid, None)
+            return
+        if action == "set_dark":
+            s["dark_link"] = text.strip()
+            save_state(s)
+            await update.message.reply_text("DARK link saved.")
+            context.application.admin_sessions.pop(uid, None)
+            return
+        if action == "set_both":
+            parts = text.strip().split()
+            if len(parts) >= 2:
+                s["vip_link"] = parts[0].strip()
+                s["dark_link"] = parts[1].strip()
+                save_state(s)
+                await update.message.reply_text("VIP and DARK links saved.")
+            else:
+                await update.message.reply_text("Please send two URLs separated by a space or newline: VIP_URL DARK_URL")
+                return
+            context.application.admin_sessions.pop(uid, None)
+            return
+        if action == "broadcast":
+            broadcast_msg = text
+            count = 0
+            for u in list(s["users"].keys()):
+                try:
+                    await context.bot.send_message(chat_id=int(u), text=broadcast_msg)
+                    count += 1
+                except Exception:
+                    pass
+            await update.message.reply_text(f"Broadcast sent to {count} users.")
+            context.application.admin_sessions.pop(uid, None)
+            return
+
     user_rec = s["users"].setdefault(str(uid), {})
     if user_rec.get("last_action") is None:
         await update.message.reply_text("⚠️ Please choose your issue using /start and tap the buttons before messaging. This helps us fast-track your request.")
         return
 
     if user_rec.get("last_action") == "awaiting_tech":
-        # forward to admin
         pending_id = str(int(time.time() * 1000))
         pending_item = {"type": "tech", "user_id": str(uid), "text": text}
         s["pending"][pending_id] = pending_item
@@ -410,6 +509,27 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("DARK link saved.")
         return
 
+    if text.startswith("/set_both_link") and uid in ADMIN_IDS:
+        parts = text.split(maxsplit=2)
+        if len(parts) < 3:
+            await update.message.reply_text("Usage: /set_both_link <vip_url> <dark_url>")
+            return
+        s["vip_link"] = parts[1].strip()
+        s["dark_link"] = parts[2].strip()
+        save_state(s)
+        await update.message.reply_text("VIP and DARK links saved.")
+        return
+
+    if text.startswith("/get_links") and uid in ADMIN_IDS:
+        await update.message.reply_text(f"VIP link: {s.get('vip_link','(not set)')}
+DARK link: {s.get('dark_link','(not set)')}")
+        return
+
+    if text.startswith("/admin") and uid in ADMIN_IDS:
+        # show admin panel
+        await send_admin_panel(uid, context)
+        return
+
     if text.startswith("/broadcast") and uid in ADMIN_IDS:
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -431,7 +551,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vip = s.get("vip_link", "(not set)")
         dark = s.get("dark_link", "(not set)")
         await update.message.reply_text(
-            f"Insights:\nPayments submitted: {counters.get('payment_submitted',0)}\nTech submitted: {counters.get('tech_submitted',0)}\nLinks sent: {counters.get('links_sent',0)}\nVIP link: {vip}\nDARK link: {dark}"
+            f"Insights:
+Payments submitted: {counters.get('payment_submitted',0)}
+Tech submitted: {counters.get('tech_submitted',0)}
+Links sent: {counters.get('links_sent',0)}
+VIP link: {vip}
+DARK link: {dark}"
         )
         return
 
@@ -454,15 +579,10 @@ def main():
     # Register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_buttons))
-
-    # media handlers (photo, document)
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, photo_or_doc_handler))
-
-    # text handler (non-command texts)
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
 
     print("Bot starting (run_polling)...")
-    # This will block until the process is stopped
     app.run_polling()
 
 
