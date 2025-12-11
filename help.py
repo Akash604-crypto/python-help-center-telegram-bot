@@ -40,6 +40,7 @@ Changelog (code review & fixes applied):
 - Replaced asyncio-based timestamp generation with time.time() for pending IDs.
 - Added basic logging for failures forwarding to admins.
 - Hardened ADMIN_ID parsing and messaging when no admins configured.
+- Fixed several string literal / f-string issues that caused SyntaxError when message text contained newlines.
 
 """
 
@@ -306,11 +307,12 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
 
     if action == "reply":
         # instruct admin to use /reply <user_id> <text>
-        await query.edit_message_text(f"To reply, use the command: /reply {user_id} <your message>
+        await query.edit_message_text(
+            f"To reply, use the command: /reply {user_id} <your message>
 
-Example: /reply {user_id} Hi, we've fixed your issue. Please check now.") {user_id} <your message>
-
-Example: /reply {user_id} Hi, we've fixed your issue. Please check now.")
+"
+            f"Example: /reply {user_id} Hi, we've fixed your issue. Please check now."
+        )
         return
 
 
@@ -364,17 +366,32 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             # forward the actual file (photo or document)
             if update.message.photo:
-                await context.bot.send_photo(chat_id=aid, photo=update.message.photo[-1].file_id, caption=f"Payment from {user.full_name} (id: {uid})
-Service: {pending_item['service']}
-Caption: {caption}", reply_markup=kb)
+                caption_text = (
+                    f"Payment from {user.full_name} (id: {uid})
+"
+                    f"Service: {pending_item['service']}
+"
+                    f"Caption: {caption}"
+                )
+                await context.bot.send_photo(chat_id=aid, photo=update.message.photo[-1].file_id, caption=caption_text, reply_markup=kb)
             elif update.message.document:
-                await context.bot.send_document(chat_id=aid, document=update.message.document.file_id, caption=f"Payment from {user.full_name} (id: {uid})
-Service: {pending_item['service']}
-Caption: {caption}", reply_markup=kb)
+                caption_text = (
+                    f"Payment from {user.full_name} (id: {uid})
+"
+                    f"Service: {pending_item['service']}
+"
+                    f"Caption: {caption}"
+                )
+                await context.bot.send_document(chat_id=aid, document=update.message.document.file_id, caption=caption_text, reply_markup=kb)
             else:
-                await context.bot.send_message(chat_id=aid, text=f"Payment from {user.full_name} (id: {uid})
-Service: {pending_item['service']}
-Caption: {caption}", reply_markup=kb)
+                caption_text = (
+                    f"Payment from {user.full_name} (id: {uid})
+"
+                    f"Service: {pending_item['service']}
+"
+                    f"Caption: {caption}"
+                )
+                await context.bot.send_message(chat_id=aid, text=caption_text, reply_markup=kb)
         except Exception as e:
             print("Failed to forward to admin", aid, e)
 
@@ -413,9 +430,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for aid in ADMIN_IDS:
             try:
-                await context.bot.send_message(chat_id=aid, text=f"Tech issue from {user.full_name} (id: {uid})
+                text_to_admin = f"Tech issue from {user.full_name} (id: {uid})
 
-{text}", reply_markup=kb)
+{text}"
+                await context.bot.send_message(chat_id=aid, text=text_to_admin, reply_markup=kb)
             except Exception as e:
                 print("Failed to forward tech issue", e)
 
