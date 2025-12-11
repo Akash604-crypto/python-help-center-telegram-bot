@@ -364,12 +364,12 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     for aid in ADMIN_IDS:
             try:
-                text_to_admin = f"Tech issue from {user.full_name} (id: {uid})\\n\\n{text}"
+                text_to_admin = f"Tech issue from {user.full_name} (id: {uid})\n\n{text}"
                 await context.bot.send_message(chat_id=aid, text=text_to_admin, reply_markup=kb)
             except Exception as e:
                 print("Failed to forward tech issue", e)
 
-        user_rec["last_action"] = None
+                user_rec["last_action"] = None
         await update.message.reply_text("Thanks — your technical issue has been forwarded to admin. We'll notify you when it's resolved.")
         return
 
