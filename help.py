@@ -41,6 +41,7 @@ Changelog (code review & fixes applied):
 - Added basic logging for failures forwarding to admins.
 - Hardened ADMIN_ID parsing and messaging when no admins configured.
 - Fixed several string literal / f-string issues that caused SyntaxError when message text contained newlines.
+- Normalized indentation and removed mixed tabs/spaces.
 
 """
 
@@ -77,21 +78,20 @@ if not BOT_TOKEN:
 
 ADMIN_IDS = set()
 if ADMIN_CHAT_ID:
-    for part in ADMIN_CHAT_ID.split(","):
+    for part in ADMIN_CHAT_ID.split(','):
         part = part.strip()
         if part:
             try:
                 ADMIN_IDS.add(int(part))
             except ValueError:
-                # ignore malformed ids but print for debugging
                 print("Warning: invalid ADMIN_CHAT_ID part:", part)
 
 # Create data dir
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 
 DEFAULT_STATE = {
-    "users": {},  # user_id -> metadata
-    "pending": {},  # pending_id -> info forwarded to admin
+    "users": {},
+    "pending": {},
     "vip_link": "",
     "dark_link": "",
     "counters": {"payment_submitted": 0, "tech_submitted": 0, "links_sent": 0},
@@ -108,12 +108,10 @@ async def load_state() -> Dict[str, Any]:
         except Exception as e:
             print("Failed to load state, using defaults:", e)
             return DEFAULT_STATE.copy()
-    else:
-        return DEFAULT_STATE.copy()
+    return DEFAULT_STATE.copy()
 
 
 async def save_state(s: Dict[str, Any]):
-    # Keep this async so handlers can await it safely
     async with state_lock:
         try:
             with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -131,11 +129,10 @@ def admin_only(func):
         if update.effective_user:
             user_id = update.effective_user.id
         if user_id not in ADMIN_IDS:
-            # Some handlers may not have message (e.g. callback_query)
             try:
-                if update.message:
+                if getattr(update, 'message', None):
                     await update.message.reply_text("Unauthorized: admin only.")
-                elif update.callback_query:
+                elif getattr(update, 'callback_query', None):
                     await update.callback_query.answer("Unauthorized", show_alert=True)
             except Exception:
                 pass
@@ -159,7 +156,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app = context.application
     s = app.help_state
 
-    # record user
     s["users"].setdefault(str(uid), {"first_name": user.first_name or "", "issues": []})
     await save_state(s)
 
@@ -191,7 +187,6 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("payment_"):
         which = data.split("_", 1)[1]
-        # ask for screenshot + optional ref/UTR
         s["users"].setdefault(str(uid), {}).update({"last_action": "awaiting_payment", "last_service": which})
         await save_state(s)
         await query.edit_message_text(
@@ -209,7 +204,6 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("For other issues please contact @Vip_Help_center1222_bot")
         return
 
-    # Admin action callbacks: approve/decline/reply/ignore
     if data.startswith("admin_pay_"):
         _, _, payload = data.partition("admin_pay_")
         if "_" not in payload:
@@ -253,7 +247,6 @@ async def handle_admin_payment_action(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text("Declined and user notified.")
         return
 
-    # handle approvals
     vip_link = s.get("vip_link", "")
     dark_link = s.get("dark_link", "")
     send_msgs = []
@@ -271,7 +264,6 @@ async def handle_admin_payment_action(update: Update, context: ContextTypes.DEFA
         await query.answer("No link configured for the chosen service. Use /set_vip_link or /set_dark_link first.")
         return
 
-    # send links to user
     for msg in send_msgs:
         await context.bot.send_message(chat_id=user_id, text=f"Admin approved. Here's your link: {msg}")
         s["counters"]["links_sent"] += 1
@@ -306,10 +298,9 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
         return
 
     if action == "reply":
-        # instruct admin to use /reply <user_id> <text>
         await query.edit_message_text(
             (
-                f"To reply, use the command: /reply {user_id} <your message>\n\n"
+                f"To reply, use the command: /reply {user_id} <your message>\\n\\n"
                 f"Example: /reply {user_id} Hi, we've fixed your issue. Please check now."
             )
         )
@@ -328,14 +319,11 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     user_rec = s["users"].get(str(uid), {})
     if user_rec.get("last_action") != "awaiting_payment":
-        # user sent media unexpectedly
         await update.message.reply_text("Please use the buttons and select your issue first. Tap /start to choose.")
         return
 
-    # extract optional caption (could contain reference/UTR)
     caption = update.message.caption or ""
 
-    # forward the media to admin(s) with action buttons
     pending_id = str(int(time.time() * 1000))
     pending_item = {
         "type": "payment",
@@ -344,17 +332,12 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         "caption": caption,
     }
 
-    # store pending and increment counter
     s["pending"][pending_id] = pending_item
     s["counters"]["payment_submitted"] += 1
     await save_state(s)
 
-    # admin buttons
     kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Approve VIP", callback_data=f"admin_pay_{pending_id}_vip"),
-            InlineKeyboardButton("Approve DARK", callback_data=f"admin_pay_{pending_id}_dark"),
-        ],
+        [InlineKeyboardButton("Approve VIP", callback_data=f"admin_pay_{pending_id}_vip"), InlineKeyboardButton("Approve DARK", callback_data=f"admin_pay_{pending_id}_dark")],
         [InlineKeyboardButton("Approve BOTH", callback_data=f"admin_pay_{pending_id}_both")],
         [InlineKeyboardButton("Decline", callback_data=f"admin_pay_{pending_id}_decline")],
     ])
@@ -363,19 +346,65 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         print("Warning: No ADMIN_IDS configured. Payment evidence will not be forwarded to any admin.")
 
     for aid in ADMIN_IDS:
+        try:
+            caption_text = (
+                f"Payment from {user.full_name} (id: {uid})\\n"
+                f"Service: {pending_item['service']}\\n"
+                f"Caption: {caption}"
+            )
+            if update.message.photo:
+                await context.bot.send_photo(chat_id=aid, photo=update.message.photo[-1].file_id, caption=caption_text, reply_markup=kb)
+            elif update.message.document:
+                await context.bot.send_document(chat_id=aid, document=update.message.document.file_id, caption=caption_text, reply_markup=kb)
+            else:
+                await context.bot.send_message(chat_id=aid, text=caption_text, reply_markup=kb)
+        except Exception as e:
+            print("Failed to forward to admin", aid, e)
+
+    await update.message.reply_text("Thanks — your payment evidence has been sent to admin for review. We'll notify you when it's processed.")
+
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle textual messages: warnings, tech submissions, and admin commands like /reply"""
+    await ensure_state(context)
+    user = update.effective_user
+    uid = user.id
+    app = context.application
+    s = app.help_state
+    text = update.message.text or ""
+
+    user_rec = s["users"].setdefault(str(uid), {})
+    if user_rec.get("last_action") is None:
+        await update.message.reply_text("⚠️ Please choose your issue using /start and tap the buttons before messaging. This helps us fast-track your request.")
+        return
+
+    if user_rec.get("last_action") == "awaiting_tech":
+        # forward to admin
+        pending_id = str(int(time.time() * 1000))
+        pending_item = {"type": "tech", "user_id": str(uid), "text": text}
+        s["pending"][pending_id] = pending_item
+        s["counters"]["tech_submitted"] += 1
+        await save_state(s)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Reply to user", callback_data=f"admin_tech_{pending_id}_reply"), InlineKeyboardButton("Ignore", callback_data=f"admin_tech_{pending_id}_ignore")]
+        ])
+
+        if not ADMIN_IDS:
+            print("Warning: No ADMIN_IDS configured. Tech issues will not be forwarded to any admin.")
+
+        for aid in ADMIN_IDS:
             try:
-                text_to_admin = f"Tech issue from {user.full_name} (id: {uid})\n\n{text}"
+                text_to_admin = f"Tech issue from {user.full_name} (id: {uid})\\n\\n{text}"
                 await context.bot.send_message(chat_id=aid, text=text_to_admin, reply_markup=kb)
             except Exception as e:
                 print("Failed to forward tech issue", e)
 
-                user_rec["last_action"] = None
+        user_rec["last_action"] = None
         await update.message.reply_text("Thanks — your technical issue has been forwarded to admin. We'll notify you when it's resolved.")
         return
 
-    # Admin reply command handled separately
     if text.startswith("/reply") and uid in ADMIN_IDS:
-        # format: /reply <user_id> <message>
         parts = text.split(maxsplit=2)
         if len(parts) < 3:
             await update.message.reply_text("Usage: /reply <user_id> <your message>")
@@ -393,7 +422,6 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"Failed to send message: {e}")
         return
 
-    # Admin set link commands
     if text.startswith("/set_vip_link") and uid in ADMIN_IDS:
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -435,44 +463,30 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         vip = s.get("vip_link", "(not set)")
         dark = s.get("dark_link", "(not set)")
         await update.message.reply_text(
-            f"Insights:
-Payments submitted: {counters.get('payment_submitted',0)}
-Tech submitted: {counters.get('tech_submitted',0)}
-Links sent: {counters.get('links_sent',0)}
-VIP link: {vip}
-DARK link: {dark}"
+            f"Insights:\nPayments submitted: {counters.get('payment_submitted',0)}\nTech submitted: {counters.get('tech_submitted',0)}\nLinks sent: {counters.get('links_sent',0)}\nVIP link: {vip}\nDARK link: {dark}"
         )
         return
 
-    # Fallback for other messages
     await update.message.reply_text("If you have an issue please use /start and choose the right button. For other help contact @Vip_Help_center1222_bot")
 
 
 # --- Main ----------------------------------------------------------------------
 
 def main():
-    # Build application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Load state synchronously at startup
     try:
         app.help_state = asyncio.run(load_state())
     except Exception as e:
         print("Failed to load initial state:", e)
         app.help_state = DEFAULT_STATE.copy()
 
-    # Register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_buttons))
-
-    # media handlers (photo, document)
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, photo_or_doc_handler))
-
-    # text handler (non-command texts)
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
 
     print("Bot starting (run_polling)...")
-    # This will block until the process is stopped
     app.run_polling()
 
 
