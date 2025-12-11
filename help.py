@@ -308,6 +308,8 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
         # instruct admin to use /reply <user_id> <text>
         await query.edit_message_text(f"To reply, use the command: /reply {user_id} <your message>
 
+Example: /reply {user_id} Hi, we've fixed your issue. Please check now.") {user_id} <your message>
+
 Example: /reply {user_id} Hi, we've fixed your issue. Please check now.")
         return
 
