@@ -308,10 +308,10 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
     if action == "reply":
         # instruct admin to use /reply <user_id> <text>
         await query.edit_message_text(
-            f"To reply, use the command: /reply {user_id} <your message>
-
-"
-            f"Example: /reply {user_id} Hi, we've fixed your issue. Please check now."
+            (
+                f"To reply, use the command: /reply {user_id} <your message>\n\n"
+                f"Example: /reply {user_id} Hi, we've fixed your issue. Please check now."
+            )
         )
         return
 
@@ -363,76 +363,8 @@ async def photo_or_doc_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         print("Warning: No ADMIN_IDS configured. Payment evidence will not be forwarded to any admin.")
 
     for aid in ADMIN_IDS:
-        try:
-            # forward the actual file (photo or document)
-            if update.message.photo:
-                caption_text = (
-                    f"Payment from {user.full_name} (id: {uid})
-"
-                    f"Service: {pending_item['service']}
-"
-                    f"Caption: {caption}"
-                )
-                await context.bot.send_photo(chat_id=aid, photo=update.message.photo[-1].file_id, caption=caption_text, reply_markup=kb)
-            elif update.message.document:
-                caption_text = (
-                    f"Payment from {user.full_name} (id: {uid})
-"
-                    f"Service: {pending_item['service']}
-"
-                    f"Caption: {caption}"
-                )
-                await context.bot.send_document(chat_id=aid, document=update.message.document.file_id, caption=caption_text, reply_markup=kb)
-            else:
-                caption_text = (
-                    f"Payment from {user.full_name} (id: {uid})
-"
-                    f"Service: {pending_item['service']}
-"
-                    f"Caption: {caption}"
-                )
-                await context.bot.send_message(chat_id=aid, text=caption_text, reply_markup=kb)
-        except Exception as e:
-            print("Failed to forward to admin", aid, e)
-
-    await update.message.reply_text("Thanks — your payment evidence has been sent to admin for review. We'll notify you when it's processed.")
-
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle textual messages: warnings, tech submissions, and admin commands like /reply"""
-    await ensure_state(context)
-    user = update.effective_user
-    uid = user.id
-    app = context.application
-    s = app.help_state
-    text = update.message.text or ""
-
-    # If user hasn't clicked the buttons and they send any message, warn them
-    user_rec = s["users"].setdefault(str(uid), {})
-    if user_rec.get("last_action") is None:
-        await update.message.reply_text("⚠️ Please choose your issue using /start and tap the buttons before messaging. This helps us fast-track your request.")
-        return
-
-    if user_rec.get("last_action") == "awaiting_tech":
-        # forward to admin
-        pending_id = str(int(time.time() * 1000))
-        pending_item = {"type": "tech", "user_id": str(uid), "text": text}
-        s["pending"][pending_id] = pending_item
-        s["counters"]["tech_submitted"] += 1
-        await save_state(s)
-
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Reply to user", callback_data=f"admin_tech_{pending_id}_reply"), InlineKeyboardButton("Ignore", callback_data=f"admin_tech_{pending_id}_ignore")]
-        ])
-
-        if not ADMIN_IDS:
-            print("Warning: No ADMIN_IDS configured. Tech issues will not be forwarded to any admin.")
-
-        for aid in ADMIN_IDS:
             try:
-                text_to_admin = f"Tech issue from {user.full_name} (id: {uid})
-
-{text}"
+                text_to_admin = f"Tech issue from {user.full_name} (id: {uid})\\n\\n{text}"
                 await context.bot.send_message(chat_id=aid, text=text_to_admin, reply_markup=kb)
             except Exception as e:
                 print("Failed to forward tech issue", e)
