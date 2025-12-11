@@ -19,6 +19,9 @@ import time
 from functools import wraps
 from typing import Dict, Any
 from pathlib import Path
+from telegram import Error as TGError
+from telegram.error import BadRequest
+
 
 from telegram import (
     Update,
@@ -414,6 +417,41 @@ async def handle_admin_tech_action(update: Update, context: ContextTypes.DEFAULT
     except Exception:
         pass
 
+async def safe_edit_admin_message(query, text, reply_markup=None):
+    """
+    Try to update the admin message in a safe order:
+      1) edit_message_text (if message had text)
+      2) edit_message_caption (if message was media with caption)
+      3) edit_message_reply_markup (remove buttons)
+      4) fallback to answering the callback
+    """
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+        return
+    except BadRequest as e:
+        # common case: "There is no text in the message to edit"
+        msg = str(e)
+        # try edit caption if it's a media message
+        try:
+            await query.edit_message_caption(caption=text, reply_markup=reply_markup)
+            return
+        except BadRequest:
+            # maybe there is no caption or caption can't be edited; try removing markup
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                # last fallback: answer callback so admin sees confirmation
+                try:
+                    await query.answer(text)
+                except Exception:
+                    pass
+            return
+    except Exception:
+        # last fallback: answer callback
+        try:
+            await query.answer(text)
+        except Exception:
+            pass
 
 # --- New: quick-cancel callback handler ----------------------------------------
 
